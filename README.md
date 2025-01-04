@@ -10,3 +10,5 @@ Localização Do Dispositivo Em Tempo Real
 Comunicação com o Servidor Zabbix -
 
 Futuras Atualizações -> Desenvolver bloqueios no Celular a partir do App
+
+Autor - Bruno Oliveira Carvalho
