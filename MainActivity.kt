@@ -13,39 +13,58 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
+import androidx.compose.runtime.Composable
 import com.example.monitoringmobile.ui.theme.MonitoringMobileTheme
 import androidx.core.content.ContextCompat
+import android.content.Context
+import android.location.LocationManager
+import android.os.Handler
+import android.os.Looper
+
 
 class MainActivity : ComponentActivity() {
 
     private val REQUEST_CODE_PERMISSIONS = 1000
     private val REQUIRED_PERMISSIONS =
-        mutableListOf (
-            Manifest.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.BLUETOOTH_SCAN,
+        mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
-        ).apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                add(Manifest.permission.BLUETOOTH_CONNECT)
-                add(Manifest.permission.BLUETOOTH_SCAN)
-            }
-        }.toTypedArray()
+        ).toTypedArray()
 
+    private lateinit var locationManager: LocationManager
+    private val handler = Handler(Looper.getMainLooper())
+    private val gpsCheckRunnable = object : Runnable {
+        override fun run() {
+            if (!isGpsEnabled()) {
+                redirectToGpsSettings()
+            }
+            handler.postDelayed(this, 3000) // Verifica a cada 3 segundos
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         setContent {
-            MonitoringMobileTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    Text("Funcionou Filha Da Puta!")
-                }
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Text("Verificando GPS...")
             }
         }
+
+        // Inicia o monitoramento do GPS
+        handler.post(gpsCheckRunnable)
+    }
+
+    private fun isGpsEnabled(): Boolean {
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+    }
+
+    private fun redirectToGpsSettings() {
+        val intent = Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+        startActivity(intent)
     }
 
     override fun onResume() { // Chamado quando a Activity fica visível para o usuário
@@ -63,19 +82,19 @@ class MainActivity : ComponentActivity() {
         ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
     }
 
-    override fun onRequestPermissionsResult( // Callback para o resultado da solicitação de permissões
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    private fun requestPermissions() {
+        ActivityCompat.requestPermissions(
+            this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS
+        )
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CODE_PERMISSIONS) {
-            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                startService() // Inicia o serviço APÓS o usuário conceder as permissões
-            } else {
-                // Lidar com a negação das permissões (ex: mostrar uma mensagem ao usuário)
-                finish() // Exemplo: Fecha a Activity se as permissões forem negadas.
-            }
+        if (requestCode == REQUEST_CODE_PERMISSIONS && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            startService()
+        } else {
+            // Lidar com a negação das permissões
+            finish()
         }
     }
 
@@ -88,4 +107,6 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         stopService(Intent(this, MonitoringService::class.java))
     }
+
+
 }
