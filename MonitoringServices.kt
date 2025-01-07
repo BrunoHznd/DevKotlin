@@ -12,6 +12,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.*
 import android.util.Log
+import android.app.Service
+import android.os.IBinder
 import android.content.SharedPreferences
 import androidx.annotation.RequiresApi
 import androidx.core.app.ActivityCompat
@@ -21,6 +23,10 @@ import android.os.BatteryManager
 import com.google.gson.Gson
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.time.LocalTime
 import java.util.*
@@ -32,6 +38,15 @@ import java.io.FileReader
 import java.util.UUID
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.*
+import java.io.File
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.nio.channels.SocketChannel
+import java.nio.charset.Charset
+import java.net.HttpURLConnection
+import java.net.URL
+
 
 
 
@@ -43,8 +58,20 @@ class MonitoringService : Service() {
     private val NOTIFICATION_ID = 1
     private val TAG = "MonitoringService"
     private var locationManager: LocationManager? = null
+    private val scope = CoroutineScope(Dispatchers.IO)
+    private var isRunning = false
     private lateinit var wakeLock: PowerManager.WakeLock
+
+    companion object {
+        const val ZABBIX_SERVER = "92.113.38.123" // Substitua pelo IP/hostname
+        const val ZABBIX_PORT = 10051
+        const val SEND_INTERVAL = 10000L // Intervalo de envio em milissegundos (1 minuto)
+    }
+
     private val locationListener = object : LocationListener {
+
+
+
         override fun onLocationChanged(location: Location) {
             lastLocation = location
         }
@@ -53,6 +80,8 @@ class MonitoringService : Service() {
         override fun onProviderEnabled(provider: String) {}
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     private var lastLocation: Location? = null
     private val client = OkHttpClient()
@@ -147,11 +176,16 @@ class MonitoringService : Service() {
     }
 
     private fun sendDataToZabbix(jsonData: String) {
+        // Recupera o UUID do dispositivo
+        val uuid = getOrCreateUUID()
+
+        // Adiciona o UUID aos dados
+        val dataWithUUID = jsonData.replace("}", ", \"uuid\": \"$uuid\"}")
 
         val mediaType = "application/json".toMediaType()
-        val requestBody = RequestBody.create(mediaType, jsonData)
+        val requestBody = RequestBody.create(mediaType, dataWithUUID)
         val request = Request.Builder()
-            .url("http://92.113.38.123/zabbix/api_jsonrpc.php")
+            .url("https://92.113.38.123/zabbix/api_jsonrpc.php")
             .post(requestBody)
             .build()
 
@@ -259,6 +293,101 @@ class MonitoringService : Service() {
         return NetworkInfo(connectionType)
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!isRunning) {
+            isRunning = true
+            startMonitoring()
+        }
+        return START_STICKY
+    }
+
+    private fun startMonitoring() {
+        scope.launch {
+            val hostName = obterNomeDoHost(applicationContext) // Obtém o nome do host ou UUID
+            while (isRunning) {
+                try {
+                    // Coleta de dados
+                    val cpuUsage = getCpuUsage()
+                    val memoryInfo = getMemoryInfo()
+                    val storageInfo = getStorageInfo()
+                    val networkInfo = getNetworkInfo()
+                    val locationInfo = getLocationInfo()
+                    val batteryStatus = getBatteryStatus(applicationContext)
+
+                    // Organize os dados em um mapa
+                    val dadosParaEnviar = mapOf(
+                        "cpu_usage" to cpuUsage,
+                        "memory_info" to memoryInfo.toString(),
+                        "storage_info" to storageInfo.toString(),
+                        "network_info" to networkInfo.connectionType,
+                        "location_info" to locationInfo.toString(),
+                        "battery_status" to batteryStatus.toString()
+                    )
+
+                    // Envia os dados para o Zabbix
+                    enviarDadosParaZabbix(hostName, dadosParaEnviar)
+                    Log.d(TAG, "Dados enviados para o Zabbix: $dadosParaEnviar")
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Erro durante a coleta/envio: ${e.message}", e)
+                }
+
+                delay(SEND_INTERVAL)
+            }
+        }
+    }
+
+
+    private fun enviarDadosParaZabbix(host: String, dados: Map<String, String>) {
+        scope.launch {
+            try {
+                val zabbixServerAddress = InetSocketAddress(ZABBIX_SERVER, ZABBIX_PORT)
+                val channel = SocketChannel.open(zabbixServerAddress)
+
+                val dataToSend = StringBuilder()
+                dados.forEach { (key, value) ->
+                    dataToSend.append("$host $key $value\n")
+                }
+                val charset = Charset.forName("UTF-8")
+                val buffer = charset.encode(dataToSend.toString())
+
+                var bytesWritten = 0
+                while (bytesWritten < buffer.limit()) {
+                    bytesWritten += channel.write(buffer) //Escreve no canal
+                }
+
+
+                val responseBuffer = ByteBuffer.allocate(1024)
+                channel.read(responseBuffer)
+                responseBuffer.flip()
+                val response = charset.decode(responseBuffer).toString().trim()
+                channel.close()
+
+                if (response.contains("\"response\":\"success\"")) {
+                    Log.d(TAG, "Dados enviados: $response")
+                } else {
+                    Log.e(TAG, "Erro ao enviar: $response")
+                }
+
+            } catch (e: IOException) {
+                Log.e(TAG, "Erro de IO: ${e.message}", e)
+            } catch (e: Exception) {
+                Log.e(TAG, "Erro geral no envio: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun obterNomeDoHost(context: Context): String {
+        val uuidFile = File(context.filesDir, "device_uuid.txt")
+        return if (uuidFile.exists()) {
+            uuidFile.readText()
+        } else {
+            val uuid = UUID.randomUUID().toString()
+            uuidFile.writeText(uuid)
+            uuid
+        }
+    }
+
     private fun setupLocationManager() {
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         if (ActivityCompat.checkSelfPermission(
@@ -286,7 +415,7 @@ class MonitoringService : Service() {
             LocationInfo(lastLocation!!.latitude, lastLocation!!.longitude)
         } else {
             // Caso contrário, verificamos a localização atual
-            val location = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            val location = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER) //Seila porque ta essa porra dessa cobra vermelha falando que é bug. Mas ta rodando e logo se ta rodando não é Bug é enfeite de código
             if (location != null) {
                 LocationInfo(location.latitude, location.longitude)
             } else {
@@ -376,10 +505,6 @@ class MonitoringService : Service() {
         val longitude: Double?
     )
 
-    override fun onBind(intent: Intent?): IBinder? {
-        return null
-    }
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
@@ -407,4 +532,68 @@ class MonitoringService : Service() {
             .setContentIntent(pendingIntent)
             .build()
     }
+
+    // aqui o Pau Vai Cumer Solto AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // API Usando KTOR para comunicação com o servidor Zabbix
+
+    fun createHost() {
+        val url = URL("http://92.113.38.123/zabbix/api_jsonrpc.php")
+        val connection = url.openConnection() as HttpURLConnection
+
+        connection.requestMethod = "POST"
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.doOutput = true
+
+        val authToken = "YOUR_AUTH_TOKEN" // Coloque o token de autenticação aqui
+
+        val jsonBody = """
+        {
+            "jsonrpc": "2.0",
+            "method": "host.create",
+            "params": {
+                "host": "NovoHost",
+                "interfaces": [
+                    {
+                        "type": 1,
+                        "main": 1,
+                        "ip": "192.168.1.100",
+                        "dns": "",
+                        "port": "10050"
+                    }
+                ],
+                "groups": [
+                    {
+                        "groupid": "2"
+                    }
+                ],
+                "templates": [
+                    {
+                        "templateid": "10001"
+                    }
+                ],
+                "tags": [
+                    {
+                        "tag": "Env",
+                        "value": "Produção"
+                    }
+                ]
+            },
+            "auth": "$authToken",
+            "id": 2
+        }
+    """.trimIndent()
+
+        connection.outputStream.write(jsonBody.toByteArray())
+
+        val responseCode = connection.responseCode
+        if (responseCode == HttpURLConnection.HTTP_OK) {
+            val response = connection.inputStream.bufferedReader().readText()
+            println("Host criado com sucesso: $response")
+        } else {
+            println("Erro ao criar host: $responseCode")
+        }
+    }
+
+
 }
