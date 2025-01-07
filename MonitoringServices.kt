@@ -12,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.*
 import android.util.Log
+import android.content.SharedPreferences
 import androidx.annotation.RequiresApi
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -28,6 +29,7 @@ import androidx.core.graphics.drawable.IconCompat
 import com.example.monitoringmobile.R
 import java.io.BufferedReader
 import java.io.FileReader
+import java.util.UUID
 import android.os.Handler
 import android.os.Looper
 
@@ -35,6 +37,8 @@ import android.os.Looper
 
 class MonitoringService : Service() {
 
+    private val UUID_KEY = "unique_device_uuid"
+    private lateinit var sharedPreferences: SharedPreferences
     private val CHANNEL_ID = "MonitoringChannel"
     private val NOTIFICATION_ID = 1
     private val TAG = "MonitoringService"
@@ -60,6 +64,14 @@ class MonitoringService : Service() {
         super.onCreate()
         createNotificationChannel()
         setupLocationManager()
+
+        // Inicializando SharedPreferences
+        sharedPreferences = getSharedPreferences("DevicePreferences", Context.MODE_PRIVATE)
+
+        // Verifica se já existe um UUID armazenado, senão, gera e armazena um novo
+        val uuid = getOrCreateUUID()
+        println("UUID: $uuid")
+
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Monitoring:WakeLock")
         handler = Handler(Looper.getMainLooper())
@@ -72,7 +84,7 @@ class MonitoringService : Service() {
             @RequiresApi(Build.VERSION_CODES.O)
             override fun run() {
                 val currentTime = LocalTime.now()
-                if (currentTime.hour in 8..16) {
+                if (currentTime.hour in 7..17) { // monitora o celular somente no periodo das 08:00 até 16:00
                     wakeLock.acquire()
                     collectAndSendData()
                     if (!wakeLock.isHeld){
@@ -100,7 +112,7 @@ class MonitoringService : Service() {
 
 
     private fun collectAndSendData() {
-        // Collect data
+
         val cpuUsage = getCpuUsage()
         val memoryInfo = getMemoryInfo()
         val storageInfo = getStorageInfo()
@@ -156,6 +168,21 @@ class MonitoringService : Service() {
                 }
             }
         })
+    }
+
+    private fun getOrCreateUUID(): String {
+        // Verifica se já existe um UUID armazenado
+        val uuid = sharedPreferences.getString(UUID_KEY, null)
+
+        return if (uuid != null) {
+            // Se o UUID já estiver armazenado, retorna ele
+            uuid
+        } else {
+            // Se não existir, gera um novo UUID, armazena e retorna ele
+            val newUUID = UUID.randomUUID().toString()
+            sharedPreferences.edit().putString(UUID_KEY, newUUID).apply()
+            newUUID
+        }
     }
 
     private fun getCpuUsage(): String {
